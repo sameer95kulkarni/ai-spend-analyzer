@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python installation accidentally located in project folder
+DLLs/
+Lib/
+Scripts/
+include/
+etc/
+libs/
+share/
+tcl/
+Git/
+Microsoft VS Code/
+
+# Python executables/runtime
+python.exe
+pythonw.exe
+python*.exe
+python*.dll
+python*.pdb
+vcruntime*.dll
+
+# Environment/secrets
+.env
+.streamlit/secrets.toml
+
+# Personal financial data
+*.csv
+*.xlsx
+*.xls
+
+# OS / IDE
+.DS_Store
+.vscode/

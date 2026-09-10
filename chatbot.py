@@ -7,7 +7,7 @@ from google import genai
 
 
 LOCAL_MODEL = "llama3.2"
-CLOUD_MODEL = "gemini-2.5-flash"
+CLOUD_MODEL = "gemini-3.6-flash"
 
 
 def get_gemini_client():

@@ -1,533 +1,57 @@
 import re
-
 import duckdb
 import ollama
+import streamlit as st
+
+from google import genai
 
 
-# =========================================================
-# OLLAMA MODEL
-# =========================================================
-
-MODEL = "llama3.2"
+LOCAL_MODEL = "llama3.2"
+CLOUD_MODEL = "gemini-2.5-flash"
 
 
-# =========================================================
-# GET DATABASE SCHEMA
-# =========================================================
+def get_gemini_client():
+    """Return Gemini client if API key is configured."""
 
-def get_schema(df):
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
 
-    schema = []
+        if not api_key:
+            return None
 
-    for col, dtype in zip(
-        df.columns,
-        df.dtypes
-    ):
+        return genai.Client(api_key=api_key)
 
-        safe_col = col.replace(
-            '"',
-            '""'
+    except Exception:
+        return None
+
+
+def use_cloud_llm():
+    """Check whether Gemini should be used."""
+
+    return get_gemini_client() is not None
+
+
+def call_llm(prompt):
+    """
+    Send prompt to Gemini when deployed with an API key.
+    Otherwise use local Ollama.
+    """
+
+    gemini_client = get_gemini_client()
+
+    # CLOUD MODE
+    if gemini_client:
+
+        response = gemini_client.models.generate_content(
+            model=CLOUD_MODEL,
+            contents=prompt
         )
 
-        schema.append(
-            f'"{safe_col}" ({dtype})'
-        )
+        return response.text.strip()
 
-
-    return "\n".join(
-        schema
-    )
-
-
-# =========================================================
-# GENERATE SQL
-# =========================================================
-
-def generate_sql(
-    question,
-    df
-):
-
-    schema = get_schema(
-        df
-    )
-
-
-    prompt = f"""
-You are an expert financial data analyst.
-
-You write DuckDB SQL for a personal spending analysis application.
-
-The transaction data is stored in:
-
-transactions
-
-DATABASE SCHEMA:
-{schema}
-
-USER QUESTION:
-{question}
-
-
-=========================================================
-GENERAL RULES
-=========================================================
-
-1. Generate exactly ONE SQL SELECT query.
-
-2. Use ONLY the table:
-
-transactions
-
-3. Use ONLY columns present in the schema.
-
-4. Never invent columns.
-
-5. Always put column names inside double quotes.
-
-Example:
-
-"Transaction Date"
-"Merchant Name"
-"Transaction Type"
-"Amount"
-"Category"
-
-6. Never modify the database.
-
-7. Never use:
-
-INSERT
-UPDATE
-DELETE
-DROP
-ALTER
-CREATE
-TRUNCATE
-MERGE
-REPLACE
-
-8. Return ONLY SQL.
-
-9. Do not use markdown.
-
-10. Do not use ```sql.
-
-11. Do not provide explanations.
-
-
-=========================================================
-SPENDING RULE
-=========================================================
-
-When the user asks about:
-
-spending
-spent
-expenses
-expense
-purchase
-purchases
-cost
-how much paid
-
-assume they mean successful expenses.
-
-Therefore normally include:
-
-"Transaction Type" = 'Expense'
-
-AND
-
-"Status" = 'Completed'
-
-
-Example:
-
-SELECT SUM("Amount") AS total_spent
-FROM transactions
-WHERE "Transaction Type" = 'Expense'
-AND "Status" = 'Completed';
-
-
-=========================================================
-AMOUNT RULE
-=========================================================
-
-When the user asks:
-
-"How much did I spend?"
-
-use:
-
-SUM("Amount")
-
-
-=========================================================
-TRANSACTION COUNT
-=========================================================
-
-When the user asks:
-
-"How many transactions?"
-
-use:
-
-COUNT(*)
-
-
-=========================================================
-MERCHANT / DESCRIPTION SEARCH
-=========================================================
-
-If the user mentions something such as:
-
-fuel
-petrol
-Amazon
-Flipkart
-D-Mart
-groceries
-vegetables
-hotel
-restaurant
-medical
-pharmacy
-
-search relevant text fields.
-
-Use:
-
-"Merchant Name"
-"Description"
-"Category"
-
-
-For example, fuel:
-
-WHERE
-(
-    "Merchant Name" ILIKE '%fuel%'
-    OR "Merchant Name" ILIKE '%petrol%'
-    OR "Merchant Name" ILIKE '%hpcl%'
-    OR "Merchant Name" ILIKE '%bpcl%'
-    OR "Merchant Name" ILIKE '%indian oil%'
-    OR "Category" ILIKE '%fuel%'
-    OR "Description" ILIKE '%fuel%'
-    OR "Description" ILIKE '%petrol%'
-)
-
-
-=========================================================
-CATEGORY QUESTIONS
-=========================================================
-
-If the user asks about categories:
-
-GROUP BY "Category"
-
-
-Example:
-
-SELECT
-    "Category",
-    SUM("Amount") AS total_spent
-FROM transactions
-WHERE
-    "Transaction Type" = 'Expense'
-    AND "Status" = 'Completed'
-GROUP BY "Category"
-ORDER BY total_spent DESC
-LIMIT 10;
-
-
-=========================================================
-TOP MERCHANTS
-=========================================================
-
-If the user asks:
-
-top merchants
-where do I spend most
-biggest merchants
-
-use:
-
-GROUP BY "Merchant Name"
-
-and:
-
-SUM("Amount")
-
-ORDER BY total_spent DESC
-
-
-=========================================================
-HIGHEST TRANSACTION
-=========================================================
-
-If the user asks:
-
-highest expense
-largest transaction
-biggest purchase
-
-use:
-
-ORDER BY "Amount" DESC
-
-and:
-
-LIMIT 1
-
-
-=========================================================
-MONTHLY SPENDING
-=========================================================
-
-If the user asks:
-
-monthly spending
-spending by month
-how much did I spend each month
-
-use:
-
-"Month"
-
-GROUP BY "Month"
-
-
-Example:
-
-SELECT
-    "Month",
-    SUM("Amount") AS total_spent
-FROM transactions
-WHERE
-    "Transaction Type" = 'Expense'
-    AND "Status" = 'Completed'
-GROUP BY "Month"
-ORDER BY "Month";
-
-
-=========================================================
-YEARLY SPENDING
-=========================================================
-
-If the user asks:
-
-yearly spending
-spending by year
-
-use:
-
-"Year"
-
-GROUP BY "Year"
-
-
-=========================================================
-DATE QUESTIONS
-=========================================================
-
-For date filtering use:
-
-"Transaction Date"
-
-
-For example:
-
-WHERE "Transaction Date"
-BETWEEN '2026-01-01'
-AND '2026-01-31'
-
-
-=========================================================
-INCOME QUESTIONS
-=========================================================
-
-If the user asks:
-
-income
-money received
-received money
-
-use:
-
-"Transaction Type" = 'Income'
-
-
-Do NOT use Expense.
-
-
-=========================================================
-REQUEST QUESTIONS
-=========================================================
-
-If the user specifically asks about requests:
-
-use:
-
-"Transaction Type" = 'Request'
-
-
-=========================================================
-PENDING / FAILED
-=========================================================
-
-For normal spending questions:
-
-DO NOT include:
-
-Pending
-
-or:
-
-Failed
-
-
-Only completed transactions should normally count.
-
-
-=========================================================
-TEXT SEARCH
-=========================================================
-
-For text matching use:
-
-ILIKE
-
-
-Example:
-
-"Merchant Name" ILIKE '%amazon%'
-
-
-=========================================================
-IMPORTANT
-=========================================================
-
-The database may contain thousands of transactions.
-
-Do the calculation using SQL.
-
-Do not ask the LLM to calculate the total manually.
-
-
-=========================================================
-EXAMPLES
-=========================================================
-
-
-QUESTION:
-
-How much did I spend on fuel?
-
-
-SQL:
-
-SELECT SUM("Amount") AS total_spent
-FROM transactions
-WHERE
-    "Transaction Type" = 'Expense'
-    AND "Status" = 'Completed'
-    AND (
-        "Merchant Name" ILIKE '%fuel%'
-        OR "Merchant Name" ILIKE '%petrol%'
-        OR "Merchant Name" ILIKE '%hpcl%'
-        OR "Merchant Name" ILIKE '%bpcl%'
-        OR "Merchant Name" ILIKE '%indian oil%'
-        OR "Category" ILIKE '%fuel%'
-        OR "Description" ILIKE '%fuel%'
-        OR "Description" ILIKE '%petrol%'
-    );
-
-
-QUESTION:
-
-How many transactions do I have?
-
-
-SQL:
-
-SELECT COUNT(*) AS transaction_count
-FROM transactions;
-
-
-QUESTION:
-
-What are my top spending categories?
-
-
-SQL:
-
-SELECT
-    "Category",
-    SUM("Amount") AS total_spent
-FROM transactions
-WHERE
-    "Transaction Type" = 'Expense'
-    AND "Status" = 'Completed'
-GROUP BY "Category"
-ORDER BY total_spent DESC
-LIMIT 10;
-
-
-QUESTION:
-
-What are my top 5 merchants?
-
-
-SQL:
-
-SELECT
-    "Merchant Name",
-    SUM("Amount") AS total_spent
-FROM transactions
-WHERE
-    "Transaction Type" = 'Expense'
-    AND "Status" = 'Completed'
-    AND "Merchant Name" IS NOT NULL
-    AND "Merchant Name" <> ''
-GROUP BY "Merchant Name"
-ORDER BY total_spent DESC
-LIMIT 5;
-
-
-QUESTION:
-
-What was my highest expense?
-
-
-SQL:
-
-SELECT
-    "Transaction Date",
-    "Merchant Name",
-    "Amount"
-FROM transactions
-WHERE
-    "Transaction Type" = 'Expense'
-    AND "Status" = 'Completed'
-ORDER BY "Amount" DESC
-LIMIT 1;
-
-
-Now generate the SQL.
-
-SQL:
-"""
-
-
-    # =====================================================
-    # CALL OLLAMA
-    # =====================================================
-
+    # LOCAL MODE
     response = ollama.chat(
-
-        model=MODEL,
-
+        model=LOCAL_MODEL,
         messages=[
             {
                 "role": "user",
@@ -536,84 +60,165 @@ SQL:
         ]
     )
 
-
-    sql = response[
-        "message"
-    ][
-        "content"
-    ].strip()
+    return response["message"]["content"].strip()
 
 
-    # =====================================================
-    # CLEAN SQL
-    # =====================================================
+def get_schema(df):
 
-    sql = sql.replace(
-        "```sql",
-        ""
-    )
+    schema = []
 
-    sql = sql.replace(
-        "```",
-        ""
-    )
+    for col, dtype in zip(df.columns, df.dtypes):
+        schema.append(f'"{col}" ({dtype})')
+
+    return "\n".join(schema)
+
+
+def generate_sql(question, df):
+
+    schema = get_schema(df)
+
+    prompt = f"""
+You are a financial data analyst.
+
+You are given a transaction dataset.
+
+DATABASE TABLE:
+transactions
+
+SCHEMA:
+{schema}
+
+USER QUESTION:
+{question}
+
+Your task is to generate ONE DuckDB SQL SELECT query.
+
+STRICT RULES:
+
+1. Return ONLY SQL.
+2. The query must start with SELECT.
+3. Use only the table transactions.
+4. Use only columns present in the schema.
+5. Always use double quotes around column names.
+6. Do not use INSERT.
+7. Do not use UPDATE.
+8. Do not use DELETE.
+9. Do not use DROP.
+10. Do not use ALTER.
+11. Do not use CREATE.
+12. Do not use TRUNCATE.
+13. Do not use MERGE.
+14. Do not use REPLACE.
+15. Do not use multiple SQL statements.
+16. Do not include markdown.
+17. Do not include ```sql.
+18. Do not add explanations.
+
+SPENDING RULES:
+
+For spending/expense questions normally use:
+
+"Transaction Type" = 'Expense'
+
+and:
+
+"Status" = 'Completed'
+
+unless the question clearly asks for another transaction type or status.
+
+For spending amount questions use:
+
+SUM("Amount")
+
+For transaction counts use:
+
+COUNT(*)
+
+For merchant searches use:
+
+ILIKE.
+
+For example:
+
+LOWER("Merchant Name") LIKE '%amazon%'
+
+For fuel questions consider:
+
+fuel
+petrol
+diesel
+hpcl
+bpcl
+indian oil
+bharat petroleum
+shell
+
+For grocery questions consider:
+
+grocery
+groceries
+supermarket
+dmart
+d-mart
+
+For restaurant questions consider:
+
+restaurant
+hotel
+food
+cafe
+swiggy
+zomato
+
+For monthly spending questions group using:
+
+"Month"
+
+For yearly spending questions group using:
+
+"Year"
+
+For top merchants:
+
+GROUP BY "Merchant Name"
+ORDER BY SUM("Amount") DESC
+
+For highest expense:
+
+ORDER BY "Amount" DESC
+
+For date questions use:
+
+"Transaction Date"
+
+Perform calculations inside SQL.
+
+Return only the SQL query.
+"""
+
+    sql = call_llm(prompt)
 
     sql = sql.strip()
 
+    # Remove accidental markdown
+    sql = re.sub(r"^```sql\s*", "", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"^```\s*", "", sql)
+    sql = re.sub(r"\s*```$", "", sql)
 
-    # Remove accidental SQL label
+    return sql.strip()
 
-    if sql.lower().startswith(
-        "sql:"
-    ):
-
-        sql = sql[4:].strip()
-
-
-    return sql
-
-
-# =========================================================
-# VALIDATE SQL
-# =========================================================
 
 def validate_sql(sql):
 
     sql_clean = sql.strip()
 
-    sql_lower = sql_clean.lower()
-
-
-    # -----------------------------------------------------
-    # MUST START WITH SELECT
-    # -----------------------------------------------------
-
-    if not sql_lower.startswith(
-        "select"
-    ):
-
-        raise ValueError(
-            "Only SELECT queries are allowed."
-        )
-
-
-    # -----------------------------------------------------
-    # NO MULTIPLE STATEMENTS
-    # -----------------------------------------------------
+    if not sql_clean.lower().startswith("select"):
+        raise ValueError("Only SELECT queries are allowed.")
 
     if ";" in sql_clean:
+        raise ValueError("Multiple SQL statements are not allowed.")
 
-        raise ValueError(
-            "Multiple SQL statements are not allowed."
-        )
-
-
-    # -----------------------------------------------------
-    # FORBIDDEN COMMANDS
-    # -----------------------------------------------------
-
-    forbidden = [
-
+    dangerous_keywords = [
         "insert ",
         "update ",
         "delete ",
@@ -621,221 +226,75 @@ def validate_sql(sql):
         "alter ",
         "create ",
         "truncate ",
-        "replace ",
-        "merge "
-
+        "merge ",
+        "replace "
     ]
 
+    sql_lower = sql_clean.lower()
 
-    for word in forbidden:
+    for keyword in dangerous_keywords:
+        if keyword in sql_lower:
+            raise ValueError("Unsafe SQL detected.")
 
-        if word in sql_lower:
-
-            raise ValueError(
-                "Unsafe SQL detected."
-            )
-
-
-# =========================================================
-# RUN SQL
-# =========================================================
-
-def run_sql(
-    df,
-    sql
-):
-
-    # -----------------------------------------------------
-    # VALIDATE
-    # -----------------------------------------------------
-
-    validate_sql(
-        sql
-    )
+    return True
 
 
-    # -----------------------------------------------------
-    # CONNECT DUCKDB
-    # -----------------------------------------------------
+def run_sql(df, sql):
+
+    validate_sql(sql)
 
     con = duckdb.connect()
 
-
     try:
 
-        # Register dataframe
+        con.register("transactions", df)
 
-        con.register(
-            "transactions",
-            df
-        )
+        result = con.execute(sql).df()
 
-
-        # Execute
-
-        result = con.execute(
-            sql
-        ).df()
-
+        return result
 
     finally:
 
         con.close()
 
 
-    return result
+def generate_answer(question, sql, result):
 
-
-# =========================================================
-# GENERATE NATURAL LANGUAGE ANSWER
-# =========================================================
-
-def generate_answer(
-    question,
-    sql,
-    result
-):
-
-    # -----------------------------------------------------
-    # EMPTY RESULT
-    # -----------------------------------------------------
-
-    if result.empty:
-
-        return (
-            "I couldn't find any transactions "
-            "matching your question."
-        )
-
-
-    # -----------------------------------------------------
-    # RESULT TO TEXT
-    # -----------------------------------------------------
-
-    result_text = result.to_string(
-        index=False
-    )
-
-
-    # -----------------------------------------------------
-    # PROMPT
-    # -----------------------------------------------------
+    result_text = result.to_string(index=False)
 
     prompt = f"""
-You are a personal spending assistant.
+You are a personal financial spending assistant.
 
 USER QUESTION:
 {question}
 
-DATABASE RESULT:
+QUERY RESULT:
 {result_text}
 
+Give a concise and easy-to-understand answer.
 
-Answer the user's question using ONLY the database result.
+Rules:
 
-
-RULES:
-
-1. Never invent numbers.
-
-2. Never invent transactions.
-
-3. Do not calculate values that are not present
-   in the database result.
-
-4. Be concise.
-
-5. Use Indian Rupee symbol ₹ where appropriate.
-
-6. Format amounts with commas.
-
-7. Do not mention SQL.
-
-8. Do not mention DuckDB.
-
-9. Do not mention the database.
-
-10. Do not say you are an AI.
-
-11. Answer directly.
-
-
-Example:
-
-Database result:
-
-total_spent
-12500
-
-
-Answer:
-
-You spent ₹12,500.
-
-
-Now answer the user.
+1. Answer the user's question directly.
+2. Do not mention SQL.
+3. Do not mention DuckDB.
+4. Do not mention databases.
+5. Do not explain how the query was generated.
+6. Use Indian Rupee formatting where appropriate.
+7. If there are multiple rows, summarize the important information.
+8. If the result is empty, clearly say that no matching transactions were found.
+9. Do not invent numbers.
+10. Use only information present in the query result.
 """
 
-
-    # =====================================================
-    # CALL OLLAMA
-    # =====================================================
-
-    response = ollama.chat(
-
-        model=MODEL,
-
-        messages=[
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-    )
+    return call_llm(prompt)
 
 
-    return response[
-        "message"
-    ][
-        "content"
-    ].strip()
+def ask_question(df, question):
 
+    sql = generate_sql(question, df)
 
-# =========================================================
-# MAIN CHATBOT
-# =========================================================
-
-def ask_question(
-    df,
-    question
-):
-
-    # -----------------------------------------------------
-    # STEP 1
-    # Generate SQL
-    # -----------------------------------------------------
-
-    sql = generate_sql(
-        question,
-        df
-    )
-
-
-    # -----------------------------------------------------
-    # STEP 2
-    # Execute SQL
-    # -----------------------------------------------------
-
-    result = run_sql(
-        df,
-        sql
-    )
-
-
-    # -----------------------------------------------------
-    # STEP 3
-    # Generate Answer
-    # -----------------------------------------------------
+    result = run_sql(df, sql)
 
     answer = generate_answer(
         question,
@@ -843,9 +302,4 @@ def ask_question(
         result
     )
 
-
-    return (
-        answer,
-        sql,
-        result
-    )
+    return answer, sql, result

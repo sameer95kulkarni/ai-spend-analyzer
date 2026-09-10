@@ -4,3 +4,4 @@ openpyxl
 duckdb
 plotly
 ollama
+beautifulsoup4
